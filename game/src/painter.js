@@ -1,452 +1,313 @@
-// Everything the eye sees: the nebula sky, the glowing orbs and rocks, the
-// prism-ship, the particles, the HUD and the title / pause / game-over screens.
-// One canvas, one logical field (1280x720), scaled to whatever window it gets.
-import { ARENA, HUES, INK, VESSEL } from './tuning.js';
-import { makeRng } from './rng.js';
+// Prism Drift — painter. Everything the player sees: the ship, the orbs,
+// the rocks, the gifts, the HUD, the title screen, the pause veil and the
+// game-over screen. It reads the state and draws it; it never changes it.
 
-export const VIEW_TITLE = 'title';
-export const VIEW_PLAY = 'play';
-export const VIEW_PAUSED = 'paused';
-export const VIEW_OVER = 'over';
+import { PALETTE, PRISM_COLOURS, SHIP, VIEW } from './tuning.js';
+import { MODE } from './simulation.js';
+import { drawBackground, drawFloats, drawParticles, glowCircle, glowRing } from './fx.js';
 
-const GIFT_STYLE = {
-  heart: { label: '+', color: INK.giftHeart },
-  slow: { label: '◷', color: INK.giftSlow },
-  nova: { label: '✦', color: INK.giftNova },
-};
-
-export function makePainter(canvas) {
-  const ctx = canvas.getContext('2d');
-  const sky = makeRng(20261116);
-  const stars = [];
-  for (let i = 0; i < 110; i += 1) {
-    stars.push({
-      x: sky.between(0, ARENA.width),
-      y: sky.between(0, ARENA.height),
-      size: sky.between(0.6, 2.4),
-      twinkle: sky.between(0.5, 2.2),
-      phase: sky.between(0, Math.PI * 2),
-      depth: sky.between(0.3, 1),
-    });
+/** Draw one frame. `time` is the wall-clock seconds for twinkles and pulses. */
+export function draw(ctx, state, time) {
+  ctx.save();
+  // Screen shake on a hit: a small random offset that decays with shakeTime.
+  if (state.shake > 0) {
+    const mag = state.shake * (state.shakeTime > 0 ? 1 : 0);
+    ctx.translate((Math.random() - 0.5) * mag, (Math.random() - 0.5) * mag);
   }
-  const clouds = [
-    { x: 240, y: 180, r: 340, color: 'rgba(120, 60, 220, 0.20)' },
-    { x: 1050, y: 420, r: 380, color: 'rgba(40, 140, 220, 0.16)' },
-    { x: 700, y: 90, r: 260, color: 'rgba(255, 80, 180, 0.12)' },
-    { x: 120, y: 620, r: 300, color: 'rgba(255, 150, 40, 0.10)' },
-  ];
-  // Slow-drifting glow motes: pure decoration, for depth behind the play.
-  const motes = [];
-  for (let i = 0; i < 14; i += 1) {
-    motes.push({
-      x: sky.between(0, ARENA.width),
-      y: sky.between(0, ARENA.height),
-      r: sky.between(3, 7),
-      speed: sky.between(6, 18),
-      color: sky.choice(['#ffb02e', '#2ee6ff', '#ff4fd8', '#8b5cff']),
-      phase: sky.between(0, Math.PI * 2),
-    });
-  }
+  drawBackground(ctx, state, time);
+  drawField(ctx, state, time);
+  drawShip(ctx, state, time);
+  drawParticles(ctx, state);
+  drawFloats(ctx, state);
+  ctx.restore();
 
-  function fitCanvas() {
-    const scale = Math.min(window.innerWidth / ARENA.width, window.innerHeight / ARENA.height);
-    canvas.width = Math.floor(ARENA.width * scale * window.devicePixelRatio);
-    canvas.height = Math.floor(ARENA.height * scale * window.devicePixelRatio);
-    canvas.style.width = `${Math.floor(ARENA.width * scale)}px`;
-    canvas.style.height = `${Math.floor(ARENA.height * scale)}px`;
-  }
+  drawHud(ctx, state);
+  if (state.banner !== null) drawBanner(ctx, state);
+  if (state.mode === MODE.TITLE) drawTitle(ctx, state, time);
+  if (state.mode === MODE.PAUSED) drawPaused(ctx, state);
+  if (state.mode === MODE.OVER) drawGameOver(ctx, state, time);
+}
 
-  function paintSky(clock) {
-    const gradient = ctx.createLinearGradient(0, 0, 0, ARENA.height);
-    gradient.addColorStop(0, INK.skyTop);
-    gradient.addColorStop(0.55, INK.skyMid);
-    gradient.addColorStop(1, INK.skyLow);
-    ctx.fillStyle = gradient;
-    ctx.fillRect(0, 0, ARENA.width, ARENA.height);
-    for (const cloud of clouds) {
-      const glow = ctx.createRadialGradient(cloud.x, cloud.y, 0, cloud.x, cloud.y, cloud.r);
-      glow.addColorStop(0, cloud.color);
-      glow.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.fillStyle = glow;
-      ctx.fillRect(cloud.x - cloud.r, cloud.y - cloud.r, cloud.r * 2, cloud.r * 2);
-    }
-    for (const star of stars) {
-      const alpha = 0.35 + 0.65 * Math.abs(Math.sin(clock * star.twinkle + star.phase));
-      ctx.globalAlpha = alpha * star.depth;
-      ctx.fillStyle = '#ffffff';
-      ctx.beginPath();
-      ctx.arc(star.x, star.y, star.size, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-    for (const mote of motes) {
-      const y = (mote.y + clock * mote.speed) % ARENA.height;
-      const alpha = 0.10 + 0.08 * Math.sin(clock * 0.8 + mote.phase);
-      ctx.globalAlpha = Math.max(0.04, alpha);
-      ctx.fillStyle = mote.color;
-      ctx.shadowColor = mote.color;
-      ctx.shadowBlur = 14;
-      ctx.beginPath();
-      ctx.arc(mote.x, y, mote.r, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.shadowBlur = 0;
-    ctx.globalAlpha = 1;
-  }
-
-  function paintDrop(drop) {
-    const hue = HUES[drop.hue];
-    ctx.save();
-    ctx.translate(drop.x, drop.y);
-    ctx.rotate(drop.angle);
-    // A short motion streak above the orb, fading into the sky.
-    const streak = ctx.createLinearGradient(0, -46, 0, 0);
-    streak.addColorStop(0, 'rgba(255,255,255,0)');
-    streak.addColorStop(1, hue.core);
-    ctx.globalAlpha = 0.35;
-    ctx.strokeStyle = streak;
-    ctx.lineWidth = 4;
+/** Orbs, rocks and gifts, each in its own style. */
+function drawField(ctx, state, time) {
+  for (const orb of state.orbs) {
+    const colour = PRISM_COLOURS[orb.colour];
+    const pulse = 1 + Math.sin(time * 5 + orb.phase) * 0.08;
+    glowCircle(ctx, orb.x, orb.y, orb.radius * pulse, colour.main, colour.glow);
+    // A bright core so a matching orb reads at a glance.
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
     ctx.beginPath();
-    ctx.moveTo(0, -46);
-    ctx.lineTo(0, -drop.r);
-    ctx.stroke();
-    ctx.globalAlpha = 1;
-    ctx.shadowColor = hue.core;
-    ctx.shadowBlur = 26;
-    ctx.fillStyle = hue.core;
-    ctx.beginPath();
-    ctx.arc(0, 0, drop.r, 0, Math.PI * 2);
+    ctx.arc(orb.x - orb.radius * 0.25, orb.y - orb.radius * 0.25, orb.radius * 0.28, 0, Math.PI * 2);
     ctx.fill();
-    ctx.shadowBlur = 0;
-    ctx.fillStyle = hue.halo;
-    ctx.beginPath();
-    ctx.arc(0, 0, drop.r * 0.55, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(0, 0, drop.r + 4, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath();
-    ctx.arc(-4, -5, 3.5, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
   }
 
-  function paintRock(rock) {
+  for (const rock of state.rocks) {
     ctx.save();
     ctx.translate(rock.x, rock.y);
-    ctx.rotate(rock.rotation);
-    ctx.fillStyle = INK.rock;
-    ctx.strokeStyle = INK.rockShade;
+    ctx.rotate(rock.angle);
+    ctx.shadowColor = 'rgba(160, 160, 180, 0.5)';
+    ctx.shadowBlur = 10;
+    ctx.fillStyle = '#5b5b6e';
+    ctx.strokeStyle = '#8b8ba3';
     ctx.lineWidth = 2;
     ctx.beginPath();
-    rock.corners.forEach((corner, index) => {
-      const x = Math.cos(corner.angle) * corner.r;
-      const y = Math.sin(corner.angle) * corner.r;
-      if (index === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    });
+    // A rough hexagon: a rock, not a gem.
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2;
+      const r = rock.radius * (i % 2 === 0 ? 1 : 0.78);
+      if (i === 0) ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+      else ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+    }
     ctx.closePath();
     ctx.fill();
     ctx.stroke();
-    ctx.fillStyle = INK.rockShade;
-    ctx.beginPath();
-    ctx.arc(-rock.r * 0.25, -rock.r * 0.2, rock.r * 0.22, 0, Math.PI * 2);
-    ctx.arc(rock.r * 0.3, rock.r * 0.25, rock.r * 0.16, 0, Math.PI * 2);
-    ctx.fill();
     ctx.restore();
   }
 
-  function paintGift(gift) {
-    const style = GIFT_STYLE[gift.kind];
-    const bob = Math.sin(gift.phase * 3) * 3;
-    ctx.save();
-    ctx.translate(gift.x, gift.y + bob);
-    ctx.shadowColor = style.color;
-    ctx.shadowBlur = 20;
-    ctx.fillStyle = 'rgba(10, 8, 30, 0.9)';
-    ctx.beginPath();
-    ctx.arc(0, 0, gift.r, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.shadowBlur = 0;
-    ctx.strokeStyle = style.color;
-    ctx.lineWidth = 2.5;
-    ctx.beginPath();
-    ctx.arc(0, 0, gift.r, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.fillStyle = style.color;
-    ctx.font = '700 22px system-ui, sans-serif';
+  for (const gift of state.gifts) {
+    const bob = Math.sin(time * 3 + gift.phase) * 3;
+    glowRing(ctx, gift.x, gift.y + bob, 14, '#4ade80', 'rgba(74, 222, 128, 0.6)', 3);
+    ctx.fillStyle = '#4ade80';
+    ctx.font = '700 22px "Segoe UI", system-ui, sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(style.label, 0, 1);
+    ctx.fillText('+', gift.x, gift.y + bob + 1);
+  }
+}
+
+/** The player's ship: a glowing triangle in its current colour, tilted by steering. */
+function drawShip(ctx, state, time) {
+  if (state.mode === MODE.OVER) return;
+  const ship = state.ship;
+  const colour = PRISM_COLOURS[ship.colour];
+  // The shield blink: the ship flashes while it is protected after a hit.
+  if (ship.shield > 0 && Math.floor(time * 12) % 2 === 0) return;
+  ctx.save();
+  ctx.translate(ship.x, ship.y);
+  ctx.rotate(ship.tilt);
+  ctx.shadowColor = colour.glow;
+  ctx.shadowBlur = 22;
+  ctx.fillStyle = colour.main;
+  ctx.beginPath();
+  ctx.moveTo(SHIP.radius + 6, 0);
+  ctx.lineTo(-SHIP.radius * 0.8, SHIP.radius * 0.85);
+  ctx.lineTo(-SHIP.radius * 0.45, 0);
+  ctx.lineTo(-SHIP.radius * 0.8, -SHIP.radius * 0.85);
+  ctx.closePath();
+  ctx.fill();
+  // The cockpit dot, in the next colour of the cycle: a hint at what SPACE does.
+  const next = PRISM_COLOURS[(ship.colour + 1) % PRISM_COLOURS.length];
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = next.main;
+  ctx.beginPath();
+  ctx.arc(2, 0, 4.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // The shield ring while protected.
+  if (ship.shield > 0) {
+    ctx.save();
+    ctx.globalAlpha = 0.45 + 0.25 * Math.sin(time * 10);
+    glowRing(ctx, ship.x, ship.y, SHIP.radius + 12, '#ffffff', 'rgba(255, 255, 255, 0.4)', 2);
     ctx.restore();
   }
+}
 
-  function paintPilot(pilot, clock, safeTill) {
-    const hue = HUES[pilot.hue];
-    ctx.save();
-    ctx.translate(pilot.x, pilot.y);
-    ctx.rotate(pilot.lean);
-    // A ship in its grace second after a hit blinks, so the player can see it.
-    if (clock < safeTill) ctx.globalAlpha = 0.35 + 0.3 * Math.abs(Math.sin(clock * 18));
-    const speed = Math.hypot(pilot.vx, pilot.vy);
-    if (speed > 60) {
-      const flame = 14 + Math.sin(clock * 40) * 5 + speed * 0.02;
-      const flameGradient = ctx.createLinearGradient(0, 14, 0, 14 + flame);
-      flameGradient.addColorStop(0, hue.halo);
-      flameGradient.addColorStop(1, 'rgba(255,120,40,0)');
-      ctx.fillStyle = flameGradient;
-      ctx.beginPath();
-      ctx.moveTo(-8, 14);
-      ctx.lineTo(0, 14 + flame);
-      ctx.lineTo(8, 14);
-      ctx.closePath();
-      ctx.fill();
-    }
-    ctx.shadowColor = hue.core;
-    ctx.shadowBlur = 26;
-    const bodyGradient = ctx.createLinearGradient(0, -24, 0, 18);
-    bodyGradient.addColorStop(0, '#ffffff');
-    bodyGradient.addColorStop(0.45, hue.halo);
-    bodyGradient.addColorStop(1, hue.core);
-    ctx.fillStyle = bodyGradient;
-    ctx.beginPath();
-    ctx.moveTo(0, -26);
-    ctx.lineTo(19, 16);
-    ctx.lineTo(0, 8);
-    ctx.lineTo(-19, 16);
-    ctx.closePath();
+/** The HUD: score and best top-left, wave top-centre, hearts top-right, combo bottom-centre. */
+function drawHud(ctx, state) {
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = PALETTE.hudText;
+  ctx.textAlign = 'left';
+  ctx.font = '800 30px "Segoe UI", system-ui, sans-serif';
+  ctx.fillText(`SCORE ${state.score.toLocaleString('en-US')}`, 28, 46);
+  ctx.font = '600 16px "Segoe UI", system-ui, sans-serif';
+  ctx.fillStyle = PALETTE.hudDim;
+  ctx.fillText(`BEST ${state.best.toLocaleString('en-US')}`, 28, 72);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = PALETTE.hudText;
+  ctx.font = '800 24px "Segoe UI", system-ui, sans-serif';
+  ctx.fillText(`WAVE ${state.wave}`, VIEW.width / 2, 44);
+
+  // Hearts, top-right: filled for lives left, dim outlines for lost ones.
+  const heartY = 34;
+  for (let i = 0; i < 3; i++) {
+    const x = VIEW.width - 40 - i * 38;
+    drawHeart(ctx, x, heartY, 13, i < state.hearts ? PALETTE.heartFull : PALETTE.heartEmpty);
+  }
+
+  // The combo meter, bottom-centre, only while a combo is running.
+  if (state.mode === 'playing' && state.combo > 1) {
+    const label = `COMBO x${state.combo}`;
+    ctx.font = '800 26px "Segoe UI", system-ui, sans-serif';
+    const w = ctx.measureText(label).width;
+    const cx = VIEW.width / 2;
+    ctx.fillStyle = 'rgba(10, 6, 26, 0.55)';
+    roundRect(ctx, cx - w / 2 - 16, VIEW.height - 62, w + 32, 40, 10);
     ctx.fill();
-    ctx.shadowBlur = 0;
-    ctx.strokeStyle = 'rgba(255,255,255,0.9)';
-    ctx.lineWidth = 2;
-    ctx.stroke();
-    ctx.fillStyle = hue.shade;
-    ctx.beginPath();
-    ctx.arc(0, -2, 5, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
+    ctx.fillStyle = PRISM_COLOURS[state.ship.colour].main;
+    ctx.fillText(label, cx, VIEW.height - 34);
   }
 
-  function paintFx(fx) {
-    ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
-    for (const ember of fx.embers) {
-      ctx.globalAlpha = 1 - ember.age / ember.life;
-      ctx.fillStyle = ember.color;
-      ctx.beginPath();
-      ctx.arc(ember.x, ember.y, ember.size, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.restore();
-    ctx.globalAlpha = 1;
-    ctx.font = '700 20px system-ui, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    for (const label of fx.labels) {
-      ctx.globalAlpha = 1 - label.age / label.life;
-      ctx.fillStyle = label.color;
-      ctx.fillText(label.text, label.x, label.y);
-    }
-    ctx.globalAlpha = 1;
-  }
-
-  function paintHud(state, best) {
-    ctx.textBaseline = 'alphabetic';
-    ctx.fillStyle = INK.hud;
-    ctx.font = '800 30px system-ui, sans-serif';
+  // The current colour, bottom-left, so the player always knows what matches.
+  if (state.mode === 'playing' || state.mode === 'paused') {
+    const colour = PRISM_COLOURS[state.ship.colour];
     ctx.textAlign = 'left';
-    ctx.fillText('SCORE', 28, 44);
-    ctx.font = '800 46px system-ui, sans-serif';
-    ctx.fillText(String(state.points), 28, 92);
-    ctx.font = '600 18px system-ui, sans-serif';
-    ctx.fillStyle = INK.hudSoft;
-    ctx.fillText(`BEST ${Math.max(best, state.points)}`, 28, 120);
+    ctx.font = '700 16px "Segoe UI", system-ui, sans-serif';
+    ctx.fillStyle = PALETTE.hudDim;
+    ctx.fillText('SHIP', 28, VIEW.height - 44);
+    glowCircle(ctx, 62, VIEW.height - 26, 11, colour.main, colour.glow);
+    ctx.fillStyle = colour.main;
+    ctx.fillText(colour.name.toUpperCase(), 82, VIEW.height - 20);
+  }
+}
 
-    if (state.chain >= 2) {
-      const pulse = 1 + Math.sin(state.clock * 8) * 0.06;
-      ctx.save();
-      ctx.translate(28, 158);
-      ctx.scale(pulse, pulse);
-      ctx.fillStyle = HUES[state.pilot.hue].core;
-      ctx.font = '800 30px system-ui, sans-serif';
-      ctx.textAlign = 'left';
-      ctx.fillText(`×${state.boost}  COMBO ${state.chain}`, 0, 0);
-      ctx.restore();
-    }
+/** A heart shape at (x, y), scaled by `size`. */
+function drawHeart(ctx, x, y, size, colour) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(size / 10, size / 10);
+  ctx.fillStyle = colour;
+  ctx.beginPath();
+  ctx.moveTo(0, 3);
+  ctx.bezierCurveTo(-6, -4, -11, 2, 0, 9);
+  ctx.bezierCurveTo(11, 2, 6, -4, 0, 3);
+  ctx.fill();
+  ctx.restore();
+}
 
-    ctx.textAlign = 'center';
-    ctx.fillStyle = INK.hud;
-    ctx.font = '800 26px system-ui, sans-serif';
-    ctx.fillText(`WAVE ${state.stage}`, ARENA.width / 2, 44);
-    if (state.clock < state.slowTill) {
-      ctx.fillStyle = INK.giftSlow;
-      ctx.font = '700 18px system-ui, sans-serif';
-      ctx.fillText(`SLOW TIME ${Math.ceil(state.slowTill - state.clock)}s`, ARENA.width / 2, 72);
-    }
+/** A filled rounded rectangle path, for HUD pills and panels. */
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
 
-    for (let i = 0; i < state.hearts; i += 1) {
-      const x = ARENA.width - 40 - i * 40;
-      const y = 40;
-      ctx.save();
-      ctx.translate(x, y);
-      ctx.fillStyle = INK.heart;
-      ctx.shadowColor = INK.heart;
-      ctx.shadowBlur = 12;
-      ctx.beginPath();
-      ctx.moveTo(0, 10);
-      ctx.bezierCurveTo(-14, -2, -8, -14, 0, -6);
-      ctx.bezierCurveTo(8, -14, 14, -2, 0, 10);
-      ctx.fill();
-      ctx.restore();
-    }
+/** A wave announcement, fading in the centre of the screen. */
+function drawBanner(ctx, state) {
+  const banner = state.banner;
+  const alpha = Math.min(1, banner.t / 0.5, (2.2 - banner.t) / 0.4 + 0.4);
+  ctx.save();
+  ctx.globalAlpha = Math.max(0, Math.min(1, alpha));
+  ctx.textAlign = 'center';
+  ctx.fillStyle = PALETTE.hudText;
+  ctx.font = '800 54px "Segoe UI", system-ui, sans-serif';
+  ctx.shadowColor = 'rgba(255, 46, 166, 0.7)';
+  ctx.shadowBlur = 26;
+  ctx.fillText(banner.text, VIEW.width / 2, VIEW.height / 2 - 60);
+  ctx.shadowBlur = 0;
+  ctx.font = '600 20px "Segoe UI", system-ui, sans-serif';
+  ctx.fillStyle = PALETTE.hudDim;
+  ctx.fillText(banner.sub, VIEW.width / 2, VIEW.height / 2 - 24);
+  ctx.restore();
+}
 
-    const hue = HUES[state.pilot.hue];
-    ctx.textAlign = 'right';
-    ctx.font = '700 17px system-ui, sans-serif';
-    ctx.fillStyle = hue.core;
-    ctx.fillText(`◉ ${hue.label}  —  SPACE / CLICK to switch`, ARENA.width - 28, ARENA.height - 24);
-    ctx.fillStyle = INK.hudSoft;
+/** The title screen: the name, the rules, the controls, the start prompt. */
+function drawTitle(ctx, state, time) {
+  veil(ctx, 0.42);
+  const cx = VIEW.width / 2;
+  const pulse = 1 + Math.sin(time * 2.4) * 0.03;
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.translate(cx, 190);
+  ctx.scale(pulse, pulse);
+  ctx.font = '800 84px "Segoe UI", system-ui, sans-serif';
+  ctx.shadowColor = 'rgba(255, 46, 166, 0.8)';
+  ctx.shadowBlur = 34;
+  const titleGradient = ctx.createLinearGradient(-260, 0, 260, 0);
+  titleGradient.addColorStop(0, '#ff2ea6');
+  titleGradient.addColorStop(0.5, '#22d3ee');
+  titleGradient.addColorStop(1, '#fbbf24');
+  ctx.fillStyle = titleGradient;
+  ctx.fillText('PRISM DRIFT', 0, 0);
+  ctx.restore();
+
+  ctx.textAlign = 'center';
+  ctx.font = '600 22px "Segoe UI", system-ui, sans-serif';
+  ctx.fillStyle = PALETTE.hudText;
+  ctx.fillText('Absorb orbs that match your ship. Dodge the rest.', cx, 268);
+  ctx.fillStyle = PALETTE.hudDim;
+  ctx.font = '600 18px "Segoe UI", system-ui, sans-serif';
+  ctx.fillText('Wrong colour or grey rock costs a heart. Chain matches for a combo up to x8.', cx, 300);
+  ctx.fillText('A green + gift restores one heart. Waves get faster and denser.', cx, 328);
+
+  // The three colours, as a legend.
+  const legendY = 392;
+  PRISM_COLOURS.forEach((colour, i) => {
+    const x = cx - 130 + i * 130;
+    glowCircle(ctx, x - 52, legendY - 6, 11, colour.main, colour.glow);
+    ctx.fillStyle = colour.main;
+    ctx.font = '700 17px "Segoe UI", system-ui, sans-serif';
     ctx.textAlign = 'left';
-    ctx.fillText('ARROWS / WASD / MOUSE to fly   ·   P pause   ·   M mute', 28, ARENA.height - 24);
-  }
+    ctx.fillText(colour.name.toUpperCase(), x - 32, legendY);
+  });
 
-  function paintFlag(flag) {
-    if (!flag) return;
-    const alpha = flag.age < 0.3 ? flag.age / 0.3 : flag.age > 1.7 ? Math.max(0, (2.2 - flag.age) / 0.5) : 1;
-    ctx.save();
-    ctx.globalAlpha = alpha;
-    ctx.textAlign = 'center';
-    ctx.font = '800 72px system-ui, sans-serif';
-    ctx.shadowColor = '#8b5cff';
-    ctx.shadowBlur = 30;
-    ctx.fillStyle = '#ffffff';
-    ctx.fillText(flag.text, ARENA.width / 2, ARENA.height / 2 - 40);
-    ctx.restore();
-  }
+  ctx.textAlign = 'center';
+  ctx.fillStyle = PALETTE.hudDim;
+  ctx.font = '600 18px "Segoe UI", system-ui, sans-serif';
+  ctx.fillText('STEER  arrows / WASD / mouse      COLOUR  SPACE or click      PAUSE  P      MUTE  M', cx, 452);
 
-  function shade(alpha) {
-    ctx.fillStyle = `rgba(6, 3, 18, ${alpha})`;
-    ctx.fillRect(0, 0, ARENA.width, ARENA.height);
-  }
+  const blink = 0.55 + 0.45 * Math.sin(time * 4);
+  ctx.globalAlpha = blink;
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '800 26px "Segoe UI", system-ui, sans-serif';
+  ctx.fillText('PRESS SPACE TO START', cx, 540);
+  ctx.globalAlpha = 1;
 
-  function stacked(lines, startY, gap) {
-    ctx.textAlign = 'center';
-    lines.forEach((line, index) => {
-      ctx.font = line.font;
-      ctx.fillStyle = line.color;
-      if (line.glow) {
-        ctx.shadowColor = line.glow;
-        ctx.shadowBlur = 24;
-      } else {
-        ctx.shadowBlur = 0;
-      }
-      ctx.fillText(line.text, ARENA.width / 2, startY + index * gap);
-    });
-    ctx.shadowBlur = 0;
+  if (state.best > 0) {
+    ctx.fillStyle = PALETTE.hudDim;
+    ctx.font = '600 18px "Segoe UI", system-ui, sans-serif';
+    ctx.fillText(`BEST ${state.best.toLocaleString('en-US')}`, cx, 584);
   }
+}
 
-  function paintTitle(state, best) {
-    shade(0.45);
-    const pulse = 0.75 + Math.sin(state.clock * 2.4) * 0.25;
-    const titleGradient = ctx.createLinearGradient(ARENA.width / 2 - 320, 0, ARENA.width / 2 + 320, 0);
-    titleGradient.addColorStop(0, HUES[0].core);
-    titleGradient.addColorStop(0.5, HUES[1].core);
-    titleGradient.addColorStop(1, HUES[2].core);
-    ctx.save();
-    ctx.textAlign = 'center';
-    ctx.font = '800 96px system-ui, sans-serif';
-    ctx.shadowColor = '#8b5cff';
-    ctx.shadowBlur = 36;
-    ctx.fillStyle = titleGradient;
-    ctx.fillText('PRISM DRIFT', ARENA.width / 2, 250);
-    ctx.restore();
-    stacked(
-      [
-        { text: 'Ride the light. Dodge the dark.', font: '600 28px system-ui, sans-serif', color: '#e8e0ff' },
-        { text: 'Absorb orbs that match your ship’s colour — wrong colours and rocks cost a heart.', font: '500 21px system-ui, sans-serif', color: '#c9bdf0' },
-        { text: 'Chain matches into combos up to ×8. Survive the rising waves.', font: '500 21px system-ui, sans-serif', color: '#c9bdf0' },
-        { text: 'ARROWS / WASD / MOUSE — fly      SPACE / CLICK — switch colour      1 2 3 — pick colour', font: '600 19px system-ui, sans-serif', color: '#9d8bd6' },
-      ],
-      310,
-      38,
-    );
-    ctx.save();
-    ctx.globalAlpha = pulse;
-    ctx.textAlign = 'center';
-    ctx.font = '800 30px system-ui, sans-serif';
-    ctx.fillStyle = '#ffffff';
-    ctx.fillText('PRESS SPACE OR CLICK TO START', ARENA.width / 2, 500);
-    ctx.restore();
-    if (best > 0) {
-      ctx.textAlign = 'center';
-      ctx.font = '700 22px system-ui, sans-serif';
-      ctx.fillStyle = INK.hudSoft;
-      ctx.fillText(`BEST SCORE  ${best}`, ARENA.width / 2, 548);
-    }
-  }
+/** The pause veil: a dim panel with a single line. */
+function drawPaused(ctx) {
+  veil(ctx, 0.55);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = PALETTE.hudText;
+  ctx.font = '800 48px "Segoe UI", system-ui, sans-serif';
+  ctx.fillText('PAUSED', VIEW.width / 2, VIEW.height / 2 - 8);
+  ctx.font = '600 20px "Segoe UI", system-ui, sans-serif';
+  ctx.fillStyle = PALETTE.hudDim;
+  ctx.fillText('press P to resume', VIEW.width / 2, VIEW.height / 2 + 32);
+}
 
-  function paintPaused() {
-    shade(0.55);
-    stacked(
-      [
-        { text: 'PAUSED', font: '800 64px system-ui, sans-serif', color: '#ffffff', glow: '#8b5cff' },
-        { text: 'Press P or Space to keep flying', font: '500 24px system-ui, sans-serif', color: '#c9bdf0' },
-      ],
-      330,
-      52,
-    );
-  }
+/** The game-over screen: SIGNAL LOST, the run's numbers, the restart prompt. */
+function drawGameOver(ctx, state, time) {
+  veil(ctx, 0.5);
+  const cx = VIEW.width / 2;
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.font = '800 72px "Segoe UI", system-ui, sans-serif';
+  ctx.shadowColor = 'rgba(255, 77, 109, 0.8)';
+  ctx.shadowBlur = 30;
+  ctx.fillStyle = '#ff4d6d';
+  ctx.fillText('SIGNAL LOST', cx, 220);
+  ctx.restore();
 
-  function paintOver(state, best) {
-    shade(0.62);
-    const isBest = state.points >= best && state.points > 0;
-    stacked(
-      [
-        { text: 'SIGNAL LOST', font: '800 76px system-ui, sans-serif', color: '#ff5d7a', glow: '#ff2e4d' },
-        { text: isBest ? '★ NEW BEST SCORE ★' : 'The nebula claims another pilot.', font: '700 26px system-ui, sans-serif', color: isBest ? '#ffe95d' : '#c9bdf0' },
-        { text: `SCORE  ${state.points}`, font: '800 52px system-ui, sans-serif', color: '#ffffff' },
-        { text: `BEST  ${best}      ·      WAVE ${state.stage}      ·      TOP COMBO ${state.bestChain}`, font: '600 22px system-ui, sans-serif', color: '#b9a8e8' },
-        { text: 'PRESS SPACE OR CLICK TO FLY AGAIN', font: '800 26px system-ui, sans-serif', color: '#ffffff' },
-      ],
-      240,
-      62,
-    );
-  }
+  ctx.textAlign = 'center';
+  ctx.fillStyle = PALETTE.hudText;
+  ctx.font = '800 40px "Segoe UI", system-ui, sans-serif';
+  ctx.fillText(`SCORE ${state.score.toLocaleString('en-US')}`, cx, 310);
+  ctx.font = '600 22px "Segoe UI", system-ui, sans-serif';
+  ctx.fillStyle = PALETTE.hudDim;
+  ctx.fillText(`BEST ${state.best.toLocaleString('en-US')}    •    TOP COMBO x${state.topCombo}    •    WAVE ${state.wave}`, cx, 356);
 
-  function paint(state, view, best) {
-    fitCanvas();
-    const scale = canvas.width / ARENA.width;
-    ctx.setTransform(scale, 0, 0, scale, 0, 0);
-    if (state.tremor > 0.5) {
-      ctx.translate((Math.random() - 0.5) * state.tremor, (Math.random() - 0.5) * state.tremor);
-    }
-    paintSky(state.clock);
-    for (const drop of state.drops) paintDrop(drop);
-    for (const rock of state.rocks) paintRock(rock);
-    for (const gift of state.gifts) paintGift(gift);
-    if (view !== VIEW_OVER || !state.done) paintPilot(state.pilot, state.clock, state.safeTill);
-    paintFx(state.fx);
-    if (state.flare > 0) {
-      ctx.fillStyle = `rgba(255, 60, 80, ${state.flare * 0.5})`;
-      ctx.fillRect(0, 0, ARENA.width, ARENA.height);
-    }
-    if (view === VIEW_TITLE) {
-      paintHud(state, best);
-      paintTitle(state, best);
-    } else if (view === VIEW_PLAY) {
-      paintHud(state, best);
-      paintFlag(state.flag);
-    } else if (view === VIEW_PAUSED) {
-      paintHud(state, best);
-      paintPaused();
-    } else if (view === VIEW_OVER) {
-      paintHud(state, best);
-      paintOver(state, best);
-    }
-  }
+  const blink = 0.55 + 0.45 * Math.sin(time * 4);
+  ctx.globalAlpha = blink;
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '800 26px "Segoe UI", system-ui, sans-serif';
+  ctx.fillText('PRESS SPACE TO FLY AGAIN', cx, 440);
+  ctx.globalAlpha = 1;
+}
 
-  return { paint };
+/** A full-screen dim, so a menu reads over the field behind it. */
+function veil(ctx, alpha) {
+  ctx.fillStyle = `rgba(5, 3, 15, ${alpha})`;
+  ctx.fillRect(0, 0, VIEW.width, VIEW.height);
 }

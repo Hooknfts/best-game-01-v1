@@ -1,167 +1,85 @@
-// Boot and the one loop: input is read every frame, the simulation advances in
-// fixed 1/60 s steps (several in a slow frame, none in a fast one), and the
-// painter paints what is there. The game moves between four views: title,
-// play, paused and game over.
-//
-// ?seed=N fixes the falling pattern. ?shot=title|action|surge|end (with
-// &seed=N) stages that scene instead of running the loop, paints it twice and
-// sets window.__shotReady for a screenshot.
-import { BEST_KEY, TICK } from './tuning.js';
-import { makeRng } from './rng.js';
-import { makeSound } from './sound.js';
-import { makeSim, EVT_END, EVT_GIFT, EVT_MISS, EVT_SMASH, EVT_STAGE, EVT_TAKE } from './simulation.js';
-import { SIG_CYCLE, SIG_MUTE, SIG_PAUSE, SIG_START, makeControls } from './controls.js';
-import { makePainter, VIEW_OVER, VIEW_PAUSED, VIEW_PLAY, VIEW_TITLE } from './painter.js';
-import { stageScene } from './staging.js';
+// Prism Drift — boot. The entry module: it builds the canvas, wires the
+// controls, the sound bank and the simulation together, and runs the frame
+// loop on a fixed timestep. It also handles the ?shot= staging used for the
+// entry's screenshots: pose the scene, roll it forward a fixed number of
+// steps, freeze it, and raise window.__prismShot so the screenshot script
+// knows the frame is ready.
 
-/** The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped, not replayed. */
-const MAX_FRAME = 0.25;
+import { Controls } from './controls.js';
+import { draw } from './painter.js';
+import { Rng, seedFromQuery } from './rng.js';
+import { createState, loadBest, update } from './simulation.js';
+import { SoundBank } from './sound.js';
+import { applyShot, shotFromQuery } from './staging.js';
+import { VIEW } from './tuning.js';
 
-const params = new URLSearchParams(window.location.search);
-const shot = params.get('shot');
-const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() * 4294967296);
+const STEP = 1 / 60;
+const MAX_STEPS_PER_FRAME = 5;
 
 const canvas = document.getElementById('game');
-const status = document.getElementById('status');
-const sim = makeSim(makeRng(seed));
-const painter = makePainter(canvas);
-const sound = makeSound();
+const ctx = canvas.getContext('2d');
+canvas.width = VIEW.width;
+canvas.height = VIEW.height;
 
-function readBest() {
-  try {
-    return Number.parseInt(window.localStorage.getItem(BEST_KEY) ?? '0', 10) || 0;
-  } catch {
-    return 0;
-  }
+const query = new URLSearchParams(window.location.search);
+const rng = new Rng(seedFromQuery(query));
+const state = createState(rng, loadBest());
+const controls = new Controls(canvas);
+const sound = new SoundBank();
+
+// The first gesture unlocks audio (browsers block it until then).
+const unlockAudio = () => sound.unlock();
+window.addEventListener('pointerdown', unlockAudio, { once: true });
+window.addEventListener('keydown', unlockAudio, { once: true });
+
+// A small handle for play-tests and the screenshot script. It is not part of
+// the game the player sees.
+window.__prism = { state, controls, sound };
+window.__prismShot = 'live';
+
+// Screenshot staging: pose the scene, roll it forward a fixed number of
+// steps with a neutral input, then freeze it for the photograph.
+const shotName = query.get('shot');
+if (shotName !== null) {
+  const steps = applyShot(state, shotFromQuery(query));
+  const neutral = {
+    steer: { x: 0, y: 0 },
+    pointer: null,
+    cycleColour: false,
+    togglePause: false,
+    toggleMute: false,
+    confirm: false,
+  };
+  for (let i = 0; i < steps; i++) update(state, STEP, neutral, sound);
+  state.frozen = true;
+  window.__prismShot = 'ready';
 }
 
-function saveBest(value) {
-  try {
-    window.localStorage.setItem(BEST_KEY, String(value));
-  } catch {
-    // Storage can be off (private windows): the best score then lasts this visit only.
+let last = performance.now();
+let backlog = 0;
+
+function frame(now) {
+  const elapsed = Math.min(0.25, (now - last) / 1000);
+  last = now;
+  backlog += elapsed;
+  let steps = 0;
+  while (backlog >= STEP && steps < MAX_STEPS_PER_FRAME) {
+    const input = {
+      steer: controls.steer(),
+      pointer: controls.pointer,
+      cycleColour: controls.cycleColour,
+      togglePause: controls.togglePause,
+      toggleMute: controls.toggleMute,
+      confirm: controls.confirm,
+    };
+    update(state, STEP, input, sound);
+    controls.consume();
+    backlog -= STEP;
+    steps += 1;
   }
-}
-
-function showScene(name) {
-  const scene = stageScene(name, sim);
-  // A read-only handle for automated play-testing; it changes nothing about play.
-  window.__prism = { world: sim, screen: () => scene.view, best: () => scene.best };
-  let painted = 0;
-  function paint() {
-    painter.paint(sim.state, scene.view, scene.best);
-    painted += 1;
-    if (painted < 2) requestAnimationFrame(paint);
-    else window.__shotReady = true;
-  }
-  requestAnimationFrame(paint);
-}
-
-function playGame() {
-  const controls = makeControls(canvas);
-  let view = VIEW_TITLE;
-  let best = readBest();
-  let leftover = 0;
-  let last = performance.now();
-
-  // A read-only handle for automated play-testing; it changes nothing about play.
-  window.__prism = { world: sim, screen: () => view, best: () => best };
-
-  // Screen readers (and anyone watching the page's text) hear the view changes and each hit.
-  function announce(message) {
-    status.textContent = message;
-  }
-
-  function launch() {
-    sound.wake();
-    sound.fanfare();
-    sim.restart();
-    leftover = 0;
-    view = VIEW_PLAY;
-    announce(`Playing. 3 hearts. Match your ship's colour to the orbs.`);
-  }
-
-  function finish() {
-    view = VIEW_OVER;
-    sound.dirge();
-    if (sim.state.points > best) {
-      best = sim.state.points;
-      saveBest(best);
-    }
-    announce(`Game over. Score ${sim.state.points}. Best ${best}. Press Space to fly again.`);
-  }
-
-  function handleSignals() {
-    const signals = controls.drainSignals();
-    const chosen = controls.drainPick();
-    if (chosen >= 0 && view === VIEW_PLAY) sim.setPilotHue(chosen);
-    if (signals & SIG_MUTE) {
-      sound.wake();
-      announce(sound.flipMute() ? 'Sound off.' : 'Sound on.');
-    }
-    if (signals & SIG_START && (view === VIEW_TITLE || view === VIEW_OVER)) {
-      sound.wake();
-      launch();
-      return;
-    }
-    if (signals & SIG_CYCLE && view === VIEW_PLAY) {
-      sound.wake();
-      sim.cyclePilotHue();
-    }
-    if (signals & SIG_PAUSE && view === VIEW_PLAY) {
-      view = VIEW_PAUSED;
-      announce('Paused.');
-    } else if (signals & (SIG_PAUSE | SIG_START) && view === VIEW_PAUSED) {
-      view = VIEW_PLAY;
-      announce('Playing.');
-    }
-  }
-
-  function tickWorld() {
-    if (view === VIEW_TITLE) {
-      sim.advance(TICK, { ax: 0, ay: 0, mx: null, my: null }, true);
-      return;
-    }
-    const events = sim.advance(TICK, controls.readSteer(), false);
-    if (events & EVT_TAKE) sound.chime(sim.state.chain);
-    if (events & EVT_MISS) sound.buzz();
-    if (events & EVT_SMASH) sound.thud();
-    if (events & EVT_GIFT) sound.arp();
-    if (events & EVT_STAGE) sound.rise();
-    if (events & EVT_END) finish();
-    else if (events & (EVT_MISS | EVT_SMASH)) {
-      announce(sim.state.hearts === 1 ? 'Hit. 1 heart left.' : `Hit. ${sim.state.hearts} hearts left.`);
-    }
-  }
-
-  function frame(now) {
-    requestAnimationFrame(frame);
-    leftover += Math.min((now - last) / 1000, MAX_FRAME);
-    last = now;
-    handleSignals();
-    if (view === VIEW_TITLE || view === VIEW_PLAY) {
-      while (leftover >= TICK && (view === VIEW_TITLE || view === VIEW_PLAY)) {
-        tickWorld();
-        leftover -= TICK;
-      }
-    } else {
-      leftover = 0;
-    }
-    painter.paint(sim.state, view, best);
-  }
-
-  // Leaving the tab pauses a running game rather than letting rocks fall unseen.
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && view === VIEW_PLAY) {
-      view = VIEW_PAUSED;
-      announce('Paused.');
-    }
-  });
-
-  announce('Prism Drift. Press Space or click to start.');
+  if (steps === MAX_STEPS_PER_FRAME) backlog = 0;
+  draw(ctx, state, now / 1000);
   requestAnimationFrame(frame);
 }
 
-if (shot) showScene(shot);
-else playGame();
+requestAnimationFrame(frame);

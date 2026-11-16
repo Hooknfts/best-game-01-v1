@@ -1,93 +1,69 @@
-// Every sound the game makes, synthesized live with WebAudio oscillators: no
-// audio files, no network, nothing to load. The context is created on the
-// first player gesture, so browsers never block it, and M mutes it.
-export function makeSound() {
-  let ctx = null;
-  let silent = false;
-  let bus = null;
+// Prism Drift — sound. Everything is synthesized with the Web Audio API:
+// short oscillator blips with an exponential decay, no audio files at all.
+// The context is created lazily on the first user gesture (browsers block
+// audio before that) and every call is a no-op when sound is muted or the
+// context could not be created.
 
-  function wakeContext() {
-    if (ctx) {
-      if (ctx.state === 'suspended') ctx.resume();
-      return true;
+const NOTE = {
+  absorb: [660, 880],
+  wrong: [196, 131],
+  gift: [523, 784, 1046],
+  wave: [392, 523, 659],
+  over: [330, 262, 196],
+  start: [262, 392, 523],
+  click: [440],
+};
+
+export class SoundBank {
+  constructor() {
+    this.ctx = null;
+    this.muted = false;
+    this.master = null;
+  }
+
+  /** Create the context on a user gesture; safe to call repeatedly. */
+  unlock() {
+    if (this.ctx !== null) {
+      if (this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
+      return;
     }
+    const Ctor = window.AudioContext ?? window.webkitAudioContext;
+    if (typeof Ctor !== 'function') return;
     try {
-      const Ctor = window.AudioContext || window.webkitAudioContext;
-      if (!Ctor) return false;
-      ctx = new Ctor();
-      bus = ctx.createGain();
-      bus.gain.value = 0.22;
-      bus.connect(ctx.destination);
-      return true;
+      this.ctx = new Ctor();
+      this.master = this.ctx.createGain();
+      this.master.gain.value = 0.16;
+      this.master.connect(this.ctx.destination);
     } catch {
-      return false;
+      this.ctx = null;
     }
   }
 
-  function blip({ hz, dur, wave = 'sine', vol = 0.4, at = 0, glide = 0 }) {
-    if (!ctx || silent) return;
-    const t0 = ctx.currentTime + at;
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = wave;
-    osc.frequency.setValueAtTime(hz, t0);
-    if (glide > 0) osc.frequency.exponentialRampToValueAtTime(glide, t0 + dur);
-    gain.gain.setValueAtTime(vol, t0);
-    gain.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
-    osc.connect(gain);
-    gain.connect(bus);
-    osc.start(t0);
-    osc.stop(t0 + dur + 0.02);
+  toggleMute() {
+    this.muted = !this.muted;
+    return this.muted;
   }
 
-  function arpeggio(notes, dur, wave, vol, step) {
-    notes.forEach((hz, i) => blip({ hz, dur, wave, vol, at: i * step }));
+  /** Play one named cue: a short arpeggio of sine blips. */
+  play(name) {
+    if (this.muted || this.ctx === null || this.master === null) return;
+    if (this.ctx.state !== 'running') return;
+    const notes = NOTE[name];
+    if (notes === undefined) return;
+    const now = this.ctx.currentTime;
+    notes.forEach((freq, i) => {
+      const t0 = now + i * 0.055;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = name === 'wrong' || name === 'over' ? 'triangle' : 'sine';
+      osc.frequency.setValueAtTime(freq, t0);
+      gain.gain.setValueAtTime(0.0001, t0);
+      gain.gain.exponentialRampToValueAtTime(0.9, t0 + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.22);
+      osc.connect(gain);
+      gain.connect(this.master);
+      osc.start(t0);
+      osc.stop(t0 + 0.26);
+    });
   }
-
-  return {
-    wake() {
-      wakeContext();
-    },
-    flipMute() {
-      silent = !silent;
-      return silent;
-    },
-    muted() {
-      return silent;
-    },
-    chime(chain) {
-      if (!wakeContext()) return;
-      const step = Math.min(chain, 16);
-      const base = 420 * Math.pow(1.059, step);
-      blip({ hz: base, dur: 0.12, vol: 0.5 });
-      blip({ hz: base * 1.5, dur: 0.16, vol: 0.3, at: 0.03 });
-    },
-    buzz() {
-      if (!wakeContext()) return;
-      blip({ hz: 180, dur: 0.28, wave: 'sawtooth', vol: 0.4, glide: 70 });
-      blip({ hz: 90, dur: 0.32, wave: 'square', vol: 0.25, at: 0.02, glide: 45 });
-    },
-    thud() {
-      if (!wakeContext()) return;
-      blip({ hz: 140, dur: 0.3, wave: 'sawtooth', vol: 0.5, glide: 50 });
-      blip({ hz: 60, dur: 0.4, wave: 'triangle', vol: 0.5, glide: 35 });
-    },
-    arp() {
-      if (!wakeContext()) return;
-      arpeggio([523, 659, 784, 1047], 0.14, 'triangle', 0.35, 0.06);
-    },
-    rise() {
-      if (!wakeContext()) return;
-      blip({ hz: 392, dur: 0.18, wave: 'triangle', vol: 0.35 });
-      blip({ hz: 587, dur: 0.24, wave: 'triangle', vol: 0.35, at: 0.12 });
-    },
-    fanfare() {
-      if (!wakeContext()) return;
-      arpeggio([262, 392, 523, 784], 0.16, 'triangle', 0.35, 0.07);
-    },
-    dirge() {
-      if (!wakeContext()) return;
-      arpeggio([392, 330, 262, 196], 0.3, 'triangle', 0.35, 0.16);
-    },
-  };
 }

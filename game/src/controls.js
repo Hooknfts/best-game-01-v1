@@ -1,86 +1,81 @@
-// Keyboard and mouse, read once per frame. Arrow keys and WASD steer, the
-// mouse steers toward the pointer when it moved most recently, Space or a click
-// cycles the ship's colour, 1/2/3 pick a colour outright, P pauses, M mutes.
-export const SIG_START = 1;
-export const SIG_PAUSE = 2;
-export const SIG_MUTE = 4;
-export const SIG_CYCLE = 8;
+// Prism Drift — controls. One object owns every input: the keyboard state,
+// the pointer position, and the edge-triggered requests (colour cycle, pause,
+// mute, start/restart) that the simulation consumes once per frame.
+//
+// Keys: arrows or WASD steer. SPACE or a click cycles the ship's colour.
+// P pauses, M mutes. SPACE also starts and restarts the run.
 
-const CODE_SIGNALS = {
-  Space: SIG_START | SIG_CYCLE,
-  Enter: SIG_START,
-  KeyP: SIG_PAUSE,
-  Escape: SIG_PAUSE,
-  KeyM: SIG_MUTE,
-};
+const STEER_KEYS = new Set([
+  'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+  'KeyW', 'KeyA', 'KeyS', 'KeyD',
+]);
 
-const PICK_CODES = { Digit1: 0, Digit2: 1, Digit3: 2 };
+export class Controls {
+  constructor(canvas) {
+    this.canvas = canvas;
+    // Currently held keys, by KeyboardEvent.code.
+    this.held = new Set();
+    // Pointer position in canvas pixels, or null until the pointer moves.
+    this.pointer = null;
+    // Edge requests, set by events and cleared by the simulation each frame.
+    this.cycleColour = false;
+    this.togglePause = false;
+    this.toggleMute = false;
+    this.confirm = false;
 
-export function makeControls(canvas) {
-  const held = new Set();
-  let pending = 0;
-  let pick = -1;
-  let pointer = { x: 0, y: 0, live: false };
-  let pointerLast = false;
+    window.addEventListener('keydown', (event) => {
+      if (STEER_KEYS.has(event.code) || event.code === 'Space') event.preventDefault();
+      if (event.repeat) return;
+      this.held.add(event.code);
+      if (event.code === 'Space') {
+        this.cycleColour = true;
+        this.confirm = true;
+      }
+      if (event.code === 'KeyP') this.togglePause = true;
+      if (event.code === 'KeyM') this.toggleMute = true;
+    });
+    window.addEventListener('keyup', (event) => {
+      this.held.delete(event.code);
+    });
+    window.addEventListener('blur', () => {
+      this.held.clear();
+    });
 
-  function toArena(event) {
-    const box = canvas.getBoundingClientRect();
+    canvas.addEventListener('pointermove', (event) => {
+      this.pointer = this.toCanvas(event);
+    });
+    canvas.addEventListener('pointerdown', (event) => {
+      this.pointer = this.toCanvas(event);
+      this.cycleColour = true;
+      this.confirm = true;
+    });
+  }
+
+  /** A pointer event's position in canvas pixels. */
+  toCanvas(event) {
+    const rect = this.canvas.getBoundingClientRect();
     return {
-      x: ((event.clientX - box.left) * canvas.width) / box.width,
-      y: ((event.clientY - box.top) * canvas.height) / box.height,
+      x: ((event.clientX - rect.left) / rect.width) * this.canvas.width,
+      y: ((event.clientY - rect.top) / rect.height) * this.canvas.height,
     };
   }
 
-  window.addEventListener('keydown', (event) => {
-    if (event.repeat) return;
-    held.add(event.code);
-    const signal = CODE_SIGNALS[event.code];
-    if (signal) {
-      pending |= signal;
-      event.preventDefault();
-    }
-    if (event.code in PICK_CODES) pick = PICK_CODES[event.code];
-  });
-  window.addEventListener('keyup', (event) => held.delete(event.code));
-  window.addEventListener('blur', () => held.clear());
+  /** Steering direction from the held keys: -1, 0 or 1 per axis. */
+  steer() {
+    let x = 0;
+    let y = 0;
+    if (this.held.has('ArrowLeft') || this.held.has('KeyA')) x -= 1;
+    if (this.held.has('ArrowRight') || this.held.has('KeyD')) x += 1;
+    if (this.held.has('ArrowUp') || this.held.has('KeyW')) y -= 1;
+    if (this.held.has('ArrowDown') || this.held.has('KeyS')) y += 1;
+    return { x, y };
+  }
 
-  canvas.addEventListener('pointermove', (event) => {
-    pointer = { ...toArena(event), live: true };
-    pointerLast = true;
-  });
-  canvas.addEventListener('pointerdown', (event) => {
-    pointer = { ...toArena(event), live: true };
-    pointerLast = true;
-    pending |= SIG_START | SIG_CYCLE;
-    event.preventDefault();
-  });
-
-  return {
-    /** Steering: a keyboard vector, or a mouse target when it steered last. */
-    readSteer() {
-      let ax = 0;
-      let ay = 0;
-      if (held.has('ArrowLeft') || held.has('KeyA')) ax -= 1;
-      if (held.has('ArrowRight') || held.has('KeyD')) ax += 1;
-      if (held.has('ArrowUp') || held.has('KeyW')) ay -= 1;
-      if (held.has('ArrowDown') || held.has('KeyS')) ay += 1;
-      if (ax !== 0 || ay !== 0) {
-        pointerLast = false;
-        const len = Math.hypot(ax, ay);
-        return { ax: ax / len, ay: ay / len, mx: null, my: null };
-      }
-      if (pointer.live && pointerLast) return { ax: 0, ay: 0, mx: pointer.x, my: pointer.y };
-      return { ax: 0, ay: 0, mx: null, my: null };
-    },
-    drainSignals() {
-      const signals = pending;
-      pending = 0;
-      return signals;
-    },
-    drainPick() {
-      const chosen = pick;
-      pick = -1;
-      return chosen;
-    },
-  };
+  /** Clear the one-shot requests after the simulation has read them. */
+  consume() {
+    this.cycleColour = false;
+    this.togglePause = false;
+    this.toggleMute = false;
+    this.confirm = false;
+  }
 }
